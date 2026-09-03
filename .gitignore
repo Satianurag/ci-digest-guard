@@ -1,0 +1,9 @@
+.DS_Store
+__pycache__/
+*.pyc
+.rote-release.lock
+.rote-flow-lint.json
+*.v9fixed
+*.v8fixed
+*.v7fixed
+*.fixed

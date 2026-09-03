@@ -1,0 +1,31 @@
+name: build-and-deploy-multi-service
+on:
+  push:
+    branches: [main]
+jobs:
+  build-api:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/build-push-action@v6
+        with:
+          push: true
+          tags: ghcr.io/acme/api:latest
+  build-worker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/build-push-action@v6
+        with:
+          push: true
+          tags: ghcr.io/acme/worker:latest
+  deploy-api:
+    needs: build-api
+    runs-on: ubuntu-latest
+    steps:
+      - run: terraform apply -auto-approve -var="image=ghcr.io/acme/api:latest"
+        working-directory: infra/api
+  deploy-worker:
+    needs: build-worker
+    runs-on: ubuntu-latest
+    steps:
+      - run: terraform apply -auto-approve -var="image=ghcr.io/acme/worker:latest"
+        working-directory: infra/worker

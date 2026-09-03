@@ -1,0 +1,1 @@
+{"ok": true, "skipped": true, "reason": "demo mode never opens a real PR; re-run with demo=false against a real repo"}

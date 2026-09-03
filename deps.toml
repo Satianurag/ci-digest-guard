@@ -1,0 +1,55 @@
+# ci-digest-guard host requirements.
+#
+# Required: python3 only, stdlib only -- no pip install of anything.
+# That was a deliberate choice, not an oversight: the engine was built
+# with a YAML library first, then rebuilt on pure python3 after this
+# machine's own pip refused a global install (PEP 668) mid-session --
+# exactly the setup friction this play exists to avoid.
+#
+# git and gh are only needed for open_pr=true (git to commit, gh --
+# already authenticated on this machine -- to open the PR). Read-only
+# runs, including demo=true, need neither.
+#
+# Preflight never runs these tools; it only checks presence (and version
+# when version_requirement is set). Nothing here executes at install time.
+
+schema_version = 1
+
+[[tools]]
+id = "python3"
+command = "python3"
+required = true
+version_requirement = ">=3.8.0"
+
+[[tools.install]]
+manager = "brew"
+package = "python@3"
+
+[[tools.install]]
+manager = "apt"
+package = "python3"
+
+[[tools]]
+id = "git"
+command = "git"
+required = false
+
+[[tools.install]]
+manager = "brew"
+package = "git"
+
+[[tools.install]]
+manager = "apt"
+package = "git"
+
+[[tools]]
+id = "github-cli"
+command = "gh"
+required = false
+
+[[tools.install]]
+manager = "brew"
+package = "gh"
+
+[files]
+required = []

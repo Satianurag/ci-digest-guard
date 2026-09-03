@@ -1,0 +1,24 @@
+name: build-and-deploy
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      image_digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: push
+        uses: docker/build-push-action@v6
+        with:
+          push: true
+          tags: ghcr.io/acme/api:latest
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - run: terraform apply -auto-approve -var="image=ghcr.io/acme/api@${{ needs.build.outputs.image_digest }}"
+        working-directory: infra
