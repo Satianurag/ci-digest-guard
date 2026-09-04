@@ -1,0 +1,17 @@
+name: raw-buildx-oneline
+on:
+  push:
+    branches: [main]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t ghcr.io/acme/api:latest --push .
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: hashicorp/setup-terraform@v3
+      - run: terraform apply -auto-approve -var="image=ghcr.io/acme/api:latest"
+        working-directory: infra

@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
-"""v8: same stdlib-only engine as v7, but fixes a real bug v7 crashed on --
-a multi-service file with 2+ independent build+deploy pairs. v7 tried to
-manually track how much every later line number shifted after inserting
-lines for an earlier fix, and got it wrong (crashed on the 2nd fix).
+"""v2 extension: adds detection+fix for a RAW `docker build`/`docker
+buildx build` shell command (no docker/build-push-action), which needs
+different handling because there's no single canonical `outputs.digest`
+-- confirmed by testing real docker builds:
+  - plain build output shows several different sha256 digests (manifest,
+    config, attestation manifest, manifest list); grabbing "the first
+    sha256 seen" would silently pick the wrong one.
+  - `--metadata-file` is the correct, structured way to get it: its
+    `containerimage.digest` field was cross-checked against
+    `docker inspect --format '{{.RepoDigests}}'` on a real build and
+    matched exactly. Same field name docker/actions-toolkit's own
+    resolveDigest() reads internally, so this isn't a different
+    mechanism, just the same one without the Action wrapping it.
 
-v8's fix: never trust stale line numbers across mutations. Apply exactly
-ONE finding, then re-scan the file from scratch (cheap for a workflow
-file) before applying the next one, repeating until nothing is left to
-find. Each fix is always computed against line numbers that are correct
-for the text as it currently exists.
+Everything from v9/engine.py (GH-Action detection, same-job/cross-job,
+CLI/env var mutable-tag forms, multi-tag, flow-style YAML, id-collision
+safety, byte-stable output on untouched files) is unchanged and reused.
 """
 import re
 import sys
@@ -26,7 +33,6 @@ def scan_jobs(lines):
             break
     if jobs_line is None:
         return {}
-
     job_key_indent = None
     jobs = {}
     i = jobs_line + 1
@@ -74,8 +80,6 @@ def repos_from_tags_text(text):
 
 
 def flow_style_with(lines, build_step_line, job_end):
-    """`with: {push: true, tags: repo:tag}` on one line. Return the dict
-    of key->raw-value-text if this step's `with:` is flow-style, else None."""
     idx, m = find_line(lines, build_step_line, job_end, r"^\s*with:\s*\{(.*)\}\s*$")
     if idx is None:
         return None
@@ -93,7 +97,6 @@ def extract_tags_value(lines, build_step_line, job_end):
     flow = flow_style_with(lines, build_step_line, job_end)
     if flow is not None:
         return flow.get("tags", "")
-
     idx, m = find_line(lines, build_step_line, job_end, r"^\s*tags:\s*(.*)$")
     if idx is None:
         return ""
@@ -115,21 +118,83 @@ def cli_var_regex(repo):
 
 
 def find_build_step(lines, start, end):
+    """The docker/build-push-action shape."""
     idx, _ = find_line(lines, start, end, r"uses:\s*docker/build-push-action")
     if idx is None:
         return None
     window_end = min(end, idx + 8)
-
     flow = flow_style_with(lines, idx, window_end)
     if flow is not None:
         if flow.get("push", "").strip().lower() == "false":
             return None
         return idx
-
     _, push_m = find_line(lines, idx, window_end, r"^\s*push:\s*(\S+)")
     if push_m and push_m.group(1).strip().lower() == "false":
         return None
     return idx
+
+
+DOCKER_BUILD_CMD_RE = re.compile(r"\bdocker\s+(?:buildx\s+)?build\b")
+
+
+def find_raw_build_step(lines, start, end):
+    """A `run:` step containing a raw `docker build` / `docker buildx
+    build` command line. Returns the step's own line index (the `- run:`
+    or `- name:`/`run:` line), or None. Only claims a step that is
+    actually pushed (`--push` on the command, or a `docker push` line
+    for the same tag elsewhere in the same run block) -- an unpushed
+    local build has nothing for terraform to deploy anyway."""
+    for i in range(start, end):
+        if not DOCKER_BUILD_CMD_RE.search(lines[i]):
+            continue
+        step_line = find_owning_run_step(lines, i, start)
+        if step_line is None:
+            continue
+        return step_line, i
+    return None
+
+
+def find_owning_run_step(lines, cmd_line_idx, job_start):
+    """Walk back from a line inside a run: block to the `- run:` (or
+    preceding `- id:`/`- name:`) line that starts this step."""
+    for i in range(cmd_line_idx, job_start - 1, -1):
+        if re.match(r"^\s*-\s*(id:|name:|run:|uses:)", lines[i]):
+            return i
+    return None
+
+
+def raw_build_extract_tags(lines, build_cmd_line):
+    """-t/--tag repo:tag, possibly repeated."""
+    line = lines[build_cmd_line]
+    tags = re.findall(r'(?:-t|--tag)[= ]+["\']?([^\s"\']+)', line)
+    return set(t.rsplit(":", 1)[0] if ":" in t else t for t in tags)
+
+
+def raw_build_is_pushed(lines, step_line, job_end):
+    end = job_end
+    # scope the search to just this step's own block (up to the next `- ` step)
+    for i in range(step_line + 1, job_end):
+        if re.match(r"^\s*-\s", lines[i]) and indent_of(lines[i]) <= indent_of(lines[step_line]):
+            end = i
+            break
+    return bool(find_line(lines, step_line, end, r"--push\b")[0] is not None
+                or find_line(lines, step_line, end, r"\bdocker\s+push\b")[0] is not None), end
+
+
+def raw_build_metadata_file_path(lines, step_line, step_end):
+    """The --metadata-file argument's value if present, else None."""
+    idx, m = find_line(lines, step_line, step_end, r"--metadata-file[= ]+(\S+)")
+    return m.group(1) if m else None
+
+
+def raw_build_digest_already_read(lines, step_line, step_end):
+    """Presence of --metadata-file alone is NOT enough -- confirmed by
+    testing: a build with --metadata-file whose digest is never actually
+    extracted or referenced still deploys the mutable tag untouched.
+    Only treat the digest as genuinely wired up if 'containerimage.digest'
+    (the field name the file actually carries) shows up somewhere in the
+    same job -- i.e. someone is reading it."""
+    return find_line(lines, step_line, step_end, r"containerimage\.digest")[0] is not None
 
 
 def find_mutable_ref(lines, start, end, repos):
@@ -150,15 +215,30 @@ def find_mutable_ref(lines, start, end, repos):
 
 
 def find_one(lines):
-    """Return a single finding (or None), always computed fresh against
-    the CURRENT state of `lines` -- never reused across mutations."""
     jobs = scan_jobs(lines)
     for build_job, (jstart, jend, jindent) in jobs.items():
+        # 1. docker/build-push-action shape (existing, unchanged)
         build_step_line = find_build_step(lines, jstart, jend)
-        if build_step_line is None:
-            continue
-        tags_text = extract_tags_value(lines, build_step_line, jend)
-        repos = repos_from_tags_text(tags_text)
+        if build_step_line is not None:
+            tags_text = extract_tags_value(lines, build_step_line, jend)
+            repos = repos_from_tags_text(tags_text)
+            build_kind = "action"
+            build_cmd_line = None
+            existing_meta_file = None
+        else:
+            # 2. raw `docker build`/`docker buildx build` shape
+            raw = find_raw_build_step(lines, jstart, jend)
+            if raw is None:
+                continue
+            build_step_line, build_cmd_line = raw
+            pushed, step_end = raw_build_is_pushed(lines, build_step_line, jend)
+            if not pushed:
+                continue
+            existing_meta_file = raw_build_metadata_file_path(lines, build_step_line, step_end)
+            if existing_meta_file and raw_build_digest_already_read(lines, jstart, jend):
+                continue  # metadata-file present AND its digest is actually read -- already fine
+            repos = raw_build_extract_tags(lines, build_cmd_line)
+            build_kind = "raw"
         if not repos:
             continue
 
@@ -167,7 +247,9 @@ def find_one(lines):
             kind, line_idx, repo = same_hit
             return {"scope": "same-job", "kind": kind, "line": line_idx,
                     "build_job": build_job, "deploy_job": build_job,
-                    "build_step_line": build_step_line, "image_repo": repo}
+                    "build_step_line": build_step_line, "build_cmd_line": build_cmd_line,
+                    "build_kind": build_kind, "image_repo": repo,
+                    "existing_meta_file": existing_meta_file}
 
         for other_job, (ostart, oend, oindent) in jobs.items():
             if other_job == build_job:
@@ -184,7 +266,9 @@ def find_one(lines):
                 kind, line_idx, repo = hit
                 return {"scope": "cross-job", "kind": kind, "line": line_idx,
                         "build_job": build_job, "deploy_job": other_job,
-                        "build_step_line": build_step_line, "image_repo": repo}
+                        "build_step_line": build_step_line, "build_cmd_line": build_cmd_line,
+                        "build_kind": build_kind, "image_repo": repo,
+                        "existing_meta_file": existing_meta_file}
     return None
 
 
@@ -197,41 +281,128 @@ def taken_step_ids(lines):
     return ids
 
 
-def apply_one_fix(lines, f):
-    """Mutates and returns a NEW lines list with exactly one finding fixed.
-    Every index used here is recomputed fresh from the current `lines`,
-    never carried over from a previous mutation."""
-    lines = list(lines)
-    step_line = f["build_step_line"]
+def fresh_step_id(lines, base="push"):
+    taken = taken_step_ids(lines)
+    candidate, n = base, 2
+    while candidate in taken:
+        candidate = f"{base}{n}"
+        n += 1
+    return candidate
 
+
+def apply_one_fix_action(lines, f):
+    step_line = f["build_step_line"]
     id_window = lines[max(0, step_line - 1): step_line + 1]
     existing_id_m = next((re.match(r"^\s*-?\s*id:\s*(\S+)", l) for l in id_window if re.match(r"^\s*-?\s*id:\s*(\S+)", l)), None)
-
     if existing_id_m:
         step_id = existing_id_m.group(1)
     else:
-        taken = taken_step_ids(lines)
-        candidate, n = "push", 2
-        while candidate in taken:
-            candidate = f"push{n}"
-            n += 1
-        step_id = candidate
+        step_id = fresh_step_id(lines)
         m = re.match(r"^(\s*)(-)(\s*)uses:(.*)$", lines[step_line])
         dash_indent, dash, gap, rest = m.group(1), m.group(2), m.group(3), m.group(4)
         lines[step_line] = f"{dash_indent}{dash}{gap}id: {step_id}\n"
         lines.insert(step_line + 1, f"{dash_indent}  uses:{rest}\n")
+    return lines, step_id, f"${{{{ steps.{step_id}.outputs.digest }}}}"
 
-    # re-find the mutable-reference line fresh (its index may have shifted
-    # by the single `id:` line we just possibly inserted).
+
+def apply_one_fix_raw(lines, f):
+    """Inject --metadata-file into the build command, then append an
+    extraction+export line to the same run: block. Handles both a
+    single-line `run: docker build ...` and a `run: |` block."""
+    step_line = f["build_step_line"]
+    cmd_line = f["build_cmd_line"]
+
+    if f.get("existing_meta_file"):
+        # --metadata-file is already on the command; its digest is just
+        # never read anywhere. Reuse that path -- adding a second
+        # --metadata-file flag would be redundant and confusing in the
+        # generated diff.
+        meta_file = f["existing_meta_file"]
+    else:
+        meta_file = "ci-digest-guard-metadata.json"
+        lines[cmd_line] = re.sub(
+            DOCKER_BUILD_CMD_RE,
+            lambda m: m.group(0) + f" --metadata-file {meta_file}",
+            lines[cmd_line],
+            count=1,
+        )
+
+    extract_expr = (
+        f'python3 -c "import json;print(json.load(open(\'{meta_file}\'))'
+        f"['containerimage.digest'])\""
+    )
+
+    is_block = re.match(r"^\s*-?\s*run:\s*\|\s*$", lines[step_line]) is not None
+    run_key_indent = None
+    if not is_block:
+        m = re.match(r"^(\s*)(-)(\s*)run:\s*(.*)$", lines[step_line])
+        if m:
+            dash_indent, dash, gap, rest = m.group(1), m.group(2), m.group(3), m.group(4)
+            # block-scalar content must be indented MORE than the column
+            # where "run:" itself starts, not just more than the dash --
+            # confirmed by testing: using dash_indent+2 landed content at
+            # the same column as "run:" itself, which is invalid YAML.
+            run_key_col = len(dash_indent) + len(dash) + len(gap)
+            body_indent = run_key_col + 2
+            lines[step_line] = f"{dash_indent}{dash}{gap}run: |\n"
+            lines.insert(step_line + 1, " " * body_indent + rest + "\n")
+            run_key_indent = body_indent
+            cmd_line += 1  # shifted down by the inserted first block line
+            insertion_point = step_line + 2
+        else:
+            insertion_point = cmd_line + 1
+            run_key_indent = indent_of(lines[cmd_line])
+    else:
+        run_key_indent = indent_of(lines[cmd_line])
+        j = cmd_line + 1
+        while j < len(lines) and (lines[j].strip() == "" or indent_of(lines[j]) >= run_key_indent):
+            j += 1
+        insertion_point = j
+
+    existing_id_m = re.match(r"^\s*-\s*id:\s*(\S+)", lines[step_line]) if is_block else None
+    if not existing_id_m and step_line >= 1:
+        existing_id_m = re.match(r"^\s*id:\s*(\S+)", lines[step_line - 1]) if lines[step_line - 1].strip().startswith("id:") else None
+
+    if existing_id_m:
+        step_id = existing_id_m.group(1)
+    else:
+        step_id = fresh_step_id(lines)
+        m = re.match(r"^(\s*)-(\s*)", lines[step_line])
+        if m:
+            dash_indent, gap = m.group(1), m.group(2)
+            rest_of_line = lines[step_line][m.end():]
+            lines[step_line] = f"{dash_indent}-{gap}id: {step_id}\n"
+            lines.insert(step_line + 1, f"{dash_indent} {gap}{rest_of_line}")
+            insertion_point += 1
+            cmd_line += 1
+
+    export_line = (
+        " " * run_key_indent
+        + 'echo "image_digest=$(' + extract_expr + ')" >> "$GITHUB_OUTPUT"\n'
+    )
+    lines.insert(insertion_point, export_line)
+
+    return lines, step_id, f"${{{{ steps.{step_id}.outputs.image_digest }}}}"
+
+
+def apply_one_fix(lines, f):
+    lines = list(lines)
+
+    if f["build_kind"] == "action":
+        lines, step_id, digest_expr_same_job = apply_one_fix_action(lines, f)
+    else:
+        lines, step_id, digest_expr_same_job = apply_one_fix_raw(lines, f)
+
     jobs = scan_jobs(lines)
     if f["scope"] == "same-job":
         jstart, jend, _ = jobs[f["build_job"]]
         kind_line_repo = find_mutable_ref(lines, jstart, jend, {f["image_repo"]})
-        digest_ref = f"${{{{ steps.{step_id}.outputs.digest }}}}"
+        digest_ref = digest_expr_same_job
     else:
         ostart, oend, _ = jobs[f["deploy_job"]]
         kind_line_repo = find_mutable_ref(lines, ostart, oend, {f["image_repo"]})
-        digest_ref = f'${{{{ needs.{f["build_job"]}.outputs.image_digest }}}}'
+        output_name = "image_digest"
+        digest_ref = f'${{{{ needs.{f["build_job"]}.outputs.{output_name} }}}}'
 
         jstart, jend, jindent = jobs[f["build_job"]]
         steps_idx, _ = find_line(lines, jstart, jend, r"^\s*steps:\s*$")
@@ -240,12 +411,10 @@ def apply_one_fix(lines, f):
         if out_idx is None:
             lines[steps_idx:steps_idx] = [
                 " " * body_indent + "outputs:\n",
-                " " * (body_indent + 2) + f"image_digest: ${{{{ steps.{step_id}.outputs.digest }}}}\n",
+                " " * (body_indent + 2) + f"{output_name}: {digest_expr_same_job}\n",
             ]
         else:
-            lines.insert(out_idx + 1, " " * (body_indent + 2) + f"image_digest: ${{{{ steps.{step_id}.outputs.digest }}}}\n")
-        # inserting into the build job may have shifted the deploy job's
-        # lines too if deploy comes after build in the file -- re-find it.
+            lines.insert(out_idx + 1, " " * (body_indent + 2) + f"{output_name}: {digest_expr_same_job}\n")
         jobs = scan_jobs(lines)
         ostart, oend, _ = jobs[f["deploy_job"]]
         kind_line_repo = find_mutable_ref(lines, ostart, oend, {f["image_repo"]})
@@ -295,8 +464,8 @@ if __name__ == "__main__":
             continue
         for f in findings:
             scope_desc = "same job" if f["scope"] == "same-job" else f"job '{f['deploy_job']}' (needs build job '{f['build_job']}')"
-            print(f"FOUND {path} [{f['kind']}, {scope_desc}]: terraform deploys "
+            print(f"FOUND {path} [{f['build_kind']}/{f['kind']}, {scope_desc}]: terraform deploys "
                   f"{f['image_repo']}:<mutable tag> instead of the digest the build step already produced")
-        out_path = path + ".v9fixed"
+        out_path = path + ".v2fixed"
         open(out_path, "w").writelines(fixed_lines)
         print(f"  -> {len(findings)} issue(s) fixed, wrote {out_path}")

@@ -4,18 +4,22 @@
  * Finds a GitHub Actions pipeline that builds a Docker image and then
  * deploys it via Terraform using a mutable tag (:latest, a branch name,
  * or no tag at all) instead of the immutable digest the build step
- * already produced -- and fixes it. No LLM anywhere: pure structural
- * detection over the workflow YAML, and a minimal, format-preserving
- * text patch. Same input always produces the same fix.
+ * already produced -- and fixes it. Covers both docker/build-push-action
+ * and a raw `docker build`/`docker buildx build` shell command. No LLM
+ * anywhere: pure structural detection over the workflow YAML, and a
+ * minimal, format-preserving text patch. Same input always produces the
+ * same fix.
  *
  * @rote-frontmatter
  * ---
  * name: ci-digest-guard
- * description: "Finds a GitHub Actions pipeline that builds a Docker image via docker/build-push-action and then deploys it with Terraform using a mutable tag instead of the immutable digest the build step already produced, and fixes it. A push landing between build and deploy -- or a scheduled re-run -- can otherwise deploy a different image than the one that was actually built and tested; a Docker maintainer has confirmed there are no plans to make buildx share images across GitHub Actions jobs another way, which is why pipelines lean on this pattern in the first place. Detects the pattern whether it is CLI (-var=, -var, single or double quotes) or a TF_VAR_image env var, whether build and deploy share one job or are linked by needs:, whether the build step has one tag or a multi-line block of several, and whether the action is pinned by version tag or commit SHA. Every fix is minimal: it adds an id: to the build step, a job-level output exposing steps.<id>.outputs.digest, and rewires only the one line that named the mutable tag -- nothing else in the file is touched, so the diff a reviewer sees is exactly the change and nothing more. No third-party dependencies: pure python3 standard library, so there is nothing to pip install on a machine that may not allow it. Read-only unless open_pr=true, which writes the fix to disk on a new branch and opens a PR through your already-authenticated gh CLI -- no new credential. Pass demo=true to run against three bundled fixture workflows with zero setup: one vulnerable single-service pipeline, one vulnerable two-service monorepo pipeline, and one already-correct pipeline, so CLEAR and FOUND are both visible on the first run."
+ * description: "Finds a GitHub Actions pipeline that builds a Docker image and then deploys it with Terraform using a mutable tag instead of the immutable digest the build step already produced, and fixes it. A push landing between build and deploy -- or a scheduled re-run -- can otherwise deploy a different image than the one that was actually built and tested; a Docker maintainer has confirmed there are no plans to make buildx share images across GitHub Actions jobs another way, which is why pipelines lean on this pattern in the first place. Covers two build shapes: docker/build-push-action (any version tag or commit-SHA pin), and a raw `docker build`/`docker buildx build` shell command -- for the raw shape, a plain build prints several different sha256 digests (manifest, config, attestation, manifest list) and grabbing the first one seen would silently pick the wrong one, so the fix adds --metadata-file and reads its containerimage.digest field instead, the same field name the Action uses internally, cross-checked against `docker inspect --format {{.RepoDigests}}` on a real build. Also catches the case where --metadata-file is already present but its digest is never actually read anywhere -- presence of the flag alone was confirmed by testing to NOT mean the digest reaches terraform. Detects the pattern whether it is CLI (-var=, -var, single or double quotes) or a TF_VAR_image env var, whether build and deploy share one job or are linked by needs:, whether the build step has one tag or several (multi-line block, or repeated -t/--tag flags), and whether multiple independent build+deploy pairs exist in one file (a monorepo with several services -- every pair gets fixed, not just the first). Every fix is minimal: it adds an id: to the build step, an output exposing the digest, and rewires only the one line that named the mutable tag -- nothing else in the file is touched, so the diff a reviewer sees is exactly the change and nothing more. No third-party dependencies: pure python3 standard library, so there is nothing to pip install on a machine that may not allow it. Read-only unless open_pr=true, which writes the fix to disk on a new branch and opens a PR through your already-authenticated gh CLI -- no new credential. Pass demo=true to run against four bundled fixture workflows with zero setup: a vulnerable single-service pipeline, a vulnerable two-service monorepo, a vulnerable raw-buildx pipeline, and one already-correct pipeline, so CLEAR and FOUND are both visible on the first run."
+ * source: https://github.com/Satianurag/ci-digest-guard
  * provenance:
  *   author: Satianurag <anuragsati6476@gmail.com>
+ *   workspace: satianurag/ci-digest-guard
  * metadata:
- *   version: 0.1.0
+ *   version: 0.2.0
  *   rote_version: 0.78.0
  *   status: draft
  *   kind: atomic
