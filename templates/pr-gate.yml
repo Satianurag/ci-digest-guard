@@ -1,0 +1,42 @@
+name: ci-digest-guard gate
+
+# Copy this file to .github/workflows/ci-digest-guard-gate.yml, and copy
+# gate.py + engine.py from the same templates/ directory to
+# .github/scripts/. No Rote installation needed at CI time -- both
+# scripts are plain python3 standard library, on purpose.
+#
+# Runs on every PR that touches a workflow file, not on a schedule --
+# this is the actual "runs repeatedly" story for this check: it fires
+# every time someone adds or edits a pipeline, which for an active repo
+# is far more frequent than daily, and it is exactly the moment a new
+# mutable-tag-into-terraform pattern would be introduced.
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/**.yml'
+      - '.github/workflows/**.yaml'
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Find changed workflow files
+        id: changed
+        run: |
+          git fetch origin "${{ github.base_ref }}" --depth=1
+          files=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD" -- '.github/workflows/*.yml' '.github/workflows/*.yaml')
+          echo "files<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$files" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Run ci-digest-guard gate
+        if: steps.changed.outputs.files != ''
+        run: python3 .github/scripts/gate.py ${{ steps.changed.outputs.files }}
