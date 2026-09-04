@@ -25,7 +25,21 @@ def indent_of(line):
     return len(line) - len(line.lstrip(" "))
 
 
+def is_blank_or_comment(line):
+    s = line.strip()
+    return s == "" or s.startswith("#")
+
+
 def scan_jobs(lines):
+    """Confirmed real bug found by testing against a real repo
+    (skkuding/codedang): a comment line (`  # TODO: ...`) sitting right
+    after `jobs:` made the old version give up and return an EMPTY job
+    map -- silently, with no error -- because it only skipped blank
+    lines, not comments, so it saw the comment, failed to match it as a
+    job key, and broke out of the scan entirely. A single stray comment
+    anywhere between job entries would have the same effect. Skipping
+    comment lines the same way blank lines are already skipped, in both
+    the outer scan and the inner per-job body walk, fixes this."""
     jobs_line = None
     for i, l in enumerate(lines):
         if re.match(r"^jobs:\s*$", l):
@@ -38,7 +52,7 @@ def scan_jobs(lines):
     i = jobs_line + 1
     while i < len(lines):
         l = lines[i]
-        if l.strip() == "":
+        if is_blank_or_comment(l):
             i += 1
             continue
         m = re.match(r"^(\s+)([A-Za-z0-9_.-]+):\s*$", l)
@@ -55,7 +69,7 @@ def scan_jobs(lines):
         name = m.group(2)
         start = i
         i += 1
-        while i < len(lines) and (lines[i].strip() == "" or indent_of(lines[i]) > job_key_indent):
+        while i < len(lines) and (is_blank_or_comment(lines[i]) or indent_of(lines[i]) > job_key_indent):
             i += 1
         jobs[name] = (start, i, job_key_indent)
     return jobs
@@ -114,7 +128,36 @@ def extract_tags_value(lines, build_step_line, job_end):
 
 
 def cli_var_regex(repo):
-    return re.compile(r'''-var[= ]+["']image=''' + re.escape(repo) + r'''(?::[^"'@]+)?["']''')
+    """Matches ANY -var key name, not just literally 'image' -- confirmed
+    necessary by testing against a real repo (cal-itp/benefits uses
+    TF_VAR_CONTAINER_TAG, not TF_VAR_IMAGE; a real Terraform module can
+    name this variable anything). Captures the key so a fix can reuse the
+    module's own name instead of guessing "image"."""
+    return re.compile(
+        r'''-var[= ]+["']([a-zA-Z_][a-zA-Z0-9_]*)=''' + re.escape(repo) + r'''(?::[^"'@]+)?["']'''
+    )
+
+
+TAGISH_WORDS = {"image", "tag", "digest", "version", "ref", "sha"}
+
+
+def is_tagish_key(key):
+    """Whole-token match on snake_case/camelCase/kebab-case pieces, not a
+    plain \\b regex -- confirmed necessary by testing: \\btag\\b does NOT
+    match inside CONTAINER_TAG, because '_' counts as a word character so
+    there is no boundary before "TAG". CONTAINER_TAG is cal-itp/benefits'
+    own real variable name. Splitting on underscore/hyphen/camelCase
+    boundaries and matching whole pieces avoids both that miss and
+    noisy substring false-positives (a plain substring search would flag
+    unrelated names like PREFERENCE or REFRESH_TOKEN on "ref"/"sha")."""
+    pieces = re.split(r"[_\-]+|(?<=[a-z0-9])(?=[A-Z])", key)
+    return any(p.lower() in TAGISH_WORDS for p in pieces if p)
+
+
+def tf_var_env_regex():
+    """Any TF_VAR_<name>: value line -- name unrestricted, confirmed
+    necessary the same way as cli_var_regex above."""
+    return re.compile(r"^(\s*)(TF_VAR_[A-Za-z0-9_]+):\s*(\S+)")
 
 
 def find_build_step(lines, start, end):
@@ -197,17 +240,33 @@ def raw_build_digest_already_read(lines, step_line, step_end):
     return find_line(lines, step_line, step_end, r"containerimage\.digest")[0] is not None
 
 
+def terraform_command_block(lines, tf_idx, end):
+    """A real `terraform apply \\` command frequently continues onto
+    following lines with backslash line-continuation, each carrying one
+    -var flag -- confirmed by testing against a real repo
+    (everclearorg/mark) where checking only the `terraform apply` line
+    itself missed every -var, all of which were one line down. Returns
+    the inclusive line range [tf_idx, block_end) covering the whole
+    logical command."""
+    i = tf_idx
+    while i < end - 1 and lines[i].rstrip("\n").rstrip().endswith("\\"):
+        i += 1
+    return tf_idx, i + 1
+
+
 def find_mutable_ref(lines, start, end, repos):
     tf_idx, _ = find_line(lines, start, end, r"terraform (apply|plan)")
     if tf_idx is not None:
-        for repo in repos:
-            m = cli_var_regex(repo).search(lines[tf_idx])
-            if m and "@" not in m.group(0):
-                return ("cli", tf_idx, repo)
+        block_start, block_end = terraform_command_block(lines, tf_idx, end)
+        for i in range(block_start, block_end):
+            for repo in repos:
+                m = cli_var_regex(repo).search(lines[i])
+                if m and "@" not in m.group(0):
+                    return ("cli", i, repo)
     for i in range(start, end):
-        m = re.match(r"^(\s*)TF_VAR_[Ii][Mm][Aa][Gg][Ee]:\s*(\S+)", lines[i])
+        m = tf_var_env_regex().match(lines[i])
         if m:
-            val = m.group(2)
+            val = m.group(3)
             for repo in repos:
                 if val.startswith(repo + ":") and "@" not in val:
                     return ("env", i, repo)
@@ -423,13 +482,14 @@ def apply_one_fix(lines, f):
     new_image = f"{repo}@{digest_ref}"
     if kind == "cli":
         m = cli_var_regex(repo).search(lines[line_idx])
+        var_key = m.group(1)  # reuse whatever name the module's own -var used
         quote = m.group(0)[-1]
         sep = "=" if re.match(r"-var=", m.group(0)) else " "
-        replacement = f'-var{sep}{quote}image={new_image}{quote}'
+        replacement = f'-var{sep}{quote}{var_key}={new_image}{quote}'
         lines[line_idx] = lines[line_idx][:m.start()] + replacement + lines[line_idx][m.end():]
     else:
-        m = re.match(r"^(\s*TF_VAR_[Ii][Mm][Aa][Gg][Ee]:\s*)\S+", lines[line_idx])
-        lines[line_idx] = m.group(1) + new_image + "\n"
+        m = tf_var_env_regex().match(lines[line_idx])
+        lines[line_idx] = f"{m.group(1)}{m.group(2)}: {new_image}\n"
 
     return lines
 
@@ -446,6 +506,88 @@ def fix_all(lines, max_iterations=20):
     return lines, findings_applied
 
 
+TFVARS_FILE_RE = re.compile(r"(?:>>\s*\S*\.?tfvars\b|-var-file[= ])")
+
+
+def find_unknowns(lines):
+    """Runs AFTER fix_all has exhausted every fixable finding. Looks for
+    a build+push step linked to a terraform apply/plan where no var value
+    could be matched to the built image at all -- but some real signal
+    suggests image/tag identity IS reaching terraform some way we cannot
+    verify from this file alone (a differently-named tag/image/version/
+    sha/digest/ref variable whose value doesn't match, or a .tfvars/
+    -var-file reference). Confirmed necessary against two real repos:
+    cal-itp/benefits passes only a bare `${{ github.sha }}` tag through
+    TF_VAR_CONTAINER_TAG while the registry/repo is assembled inside
+    Terraform HCL we cannot see; skkuding/codedang builds a full
+    terraform.tfvars file from a GitHub Secret, which is correctly opaque
+    -- reporting CLEAR in either case would be a false claim of safety
+    neither this engine nor anyone reading only the workflow YAML can
+    actually back up. This is intentionally conservative: it only fires
+    on a real, visible signal, never merely because docker and terraform
+    both appear somewhere in the same file."""
+    jobs = scan_jobs(lines)
+    build_jobs = set()
+    for job, (jstart, jend, jindent) in jobs.items():
+        if find_build_step(lines, jstart, jend) is not None:
+            build_jobs.add(job)
+        elif find_raw_build_step(lines, jstart, jend) is not None:
+            raw = find_raw_build_step(lines, jstart, jend)
+            pushed, _ = raw_build_is_pushed(lines, raw[0], jend)
+            if pushed:
+                build_jobs.add(job)
+    if not build_jobs:
+        return []
+
+    findings = []
+    for job, (jstart, jend, jindent) in jobs.items():
+        tf_idx, _ = find_line(lines, jstart, jend, r"terraform (apply|plan)")
+        if tf_idx is None:
+            continue
+
+        linked_build_job = job if job in build_jobs else None
+        if linked_build_job is None:
+            needs_idx, needs_m = find_line(lines, jstart, jend, r"^\s*needs:\s*(.*)$")
+            for bj in build_jobs:
+                if needs_idx is not None and bj in needs_m.group(1):
+                    linked_build_job = bj
+                    break
+        if linked_build_job is None:
+            continue
+
+        block_start, block_end = terraform_command_block(lines, tf_idx, jend)
+        block_text = "".join(lines[block_start:block_end])
+        if "@sha256:" in block_text:
+            continue  # already looks digest-pinned in the visible command
+
+        signal = None
+        for i in range(jstart, jend):
+            m = tf_var_env_regex().match(lines[i])
+            if m and is_tagish_key(m.group(2)) and "@" not in m.group(3):
+                signal = (i, f"env var {m.group(2)} looks image/tag-related "
+                              f"but its value doesn't match the image this job builds")
+                break
+        if signal is None:
+            for i in range(block_start, block_end):
+                m = re.search(r'''-var[= ]+["']([a-zA-Z_][a-zA-Z0-9_]*)=([^"']*)["']''', lines[i])
+                if m and is_tagish_key(m.group(1)) and "@" not in m.group(2):
+                    signal = (i, f"-var {m.group(1)} looks image/tag-related "
+                                 f"but its value doesn't match the image this job builds")
+                    break
+        if signal is None:
+            for i in range(jstart, jend):
+                if TFVARS_FILE_RE.search(lines[i]):
+                    signal = (i, "a .tfvars file is written or referenced here -- "
+                                 "the actual image reference may be set there")
+                    break
+
+        if signal:
+            line_idx, reason = signal
+            findings.append({"build_job": linked_build_job, "deploy_job": job,
+                              "line": line_idx + 1, "reason": reason})
+    return findings
+
+
 if __name__ == "__main__":
     for path in sys.argv[1:]:
         try:
@@ -456,16 +598,24 @@ if __name__ == "__main__":
             continue
         try:
             fixed_lines, findings = fix_all(lines)
+            unknowns = find_unknowns(fixed_lines)
         except Exception as e:
             print(f"SKIPPED {path}: could not analyze/fix ({e.__class__.__name__}: {e})")
             continue
-        if not findings:
+
+        if not findings and not unknowns:
             print(f"CLEAR {path}: no mutable-tag-into-terraform pattern detected")
             continue
+
         for f in findings:
             scope_desc = "same job" if f["scope"] == "same-job" else f"job '{f['deploy_job']}' (needs build job '{f['build_job']}')"
             print(f"FOUND {path} [{f['build_kind']}/{f['kind']}, {scope_desc}]: terraform deploys "
                   f"{f['image_repo']}:<mutable tag> instead of the digest the build step already produced")
-        out_path = path + ".v2fixed"
-        open(out_path, "w").writelines(fixed_lines)
-        print(f"  -> {len(findings)} issue(s) fixed, wrote {out_path}")
+        if findings:
+            out_path = path + ".v2fixed"
+            open(out_path, "w").writelines(fixed_lines)
+            print(f"  -> {len(findings)} issue(s) fixed, wrote {out_path}")
+
+        for u in unknowns:
+            print(f"UNKNOWN {path} [job '{u['deploy_job']}' (build job '{u['build_job']}'), line {u['line']}]: "
+                  f"{u['reason']} -- cannot verify safe or unsafe from this workflow file alone")

@@ -27,7 +27,9 @@ def main():
     demo = scan_json.get("demo", False)
     repo_path = scan_json.get("repo_path")
     results = scan_json.get("results", [])
-    found = [r for r in results if r.get("status") == "FOUND"]
+    # MIXED files (some fixable, some UNKNOWN) still carry a real fix and
+    # fixed_content -- only true UNKNOWN-only files have nothing to write.
+    found = [r for r in results if r.get("status") in ("FOUND", "MIXED")]
 
     if demo:
         print(json.dumps({"ok": True, "skipped": True,
