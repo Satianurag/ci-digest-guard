@@ -19,7 +19,7 @@
  *   author: Satianurag <anuragsati6476@gmail.com>
  *   workspace: satianurag/ci-digest-guard
  * metadata:
- *   version: 0.5.3
+ *   version: 0.5.4
  *   rote_version: 0.80.0
  *   status: draft
  *   kind: atomic
@@ -431,7 +431,7 @@ async function renderSuccess(): Promise<void> {
       reason: r.reason ?? null,
     })),
     pr: openPrOut,
-    play_version: "0.5.3",
+    play_version: "0.5.4",
     run_id: ctx.run.run_id,
     representations: {
       human: "complete — per-file status, findings, and PR outcome if requested",
