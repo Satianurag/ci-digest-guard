@@ -13,14 +13,14 @@
  * @rote-frontmatter
  * ---
  * name: ci-digest-guard
- * description: "Finds a GitHub Actions pipeline that builds a Docker image and then deploys it with Terraform using a mutable tag instead of the immutable digest the build step already produced, and fixes it. A push landing between build and deploy -- or a scheduled re-run -- can otherwise deploy a different image than the one that was actually built and tested; a Docker maintainer has confirmed there are no plans to make buildx share images across GitHub Actions jobs another way, which is why pipelines lean on this pattern in the first place. Covers two build shapes: docker/build-push-action (any version tag or commit-SHA pin), and a raw `docker build`/`docker buildx build` shell command -- for the raw shape, a plain build prints several different sha256 digests (manifest, config, attestation, manifest list) and grabbing the first one seen would silently pick the wrong one, so the fix adds --metadata-file and reads its containerimage.digest field instead, the same field name the Action uses internally, cross-checked against `docker inspect --format {{.RepoDigests}}` on a real build. Also catches the case where --metadata-file is already present but its digest is never actually read anywhere. Matches ANY -var or TF_VAR_ name, not just literally 'image' or 'IMAGE' -- confirmed necessary against a real repo (cal-itp/benefits names its variable TF_VAR_CONTAINER_TAG) -- and follows a real terraform command across backslash line-continuations onto later lines, where the actual -var flags often live (confirmed against everclearorg/mark). When a build+deploy pair exists but no variable's value can be matched to the built image at all, reports UNKNOWN rather than a false CLEAR: this fires only on a real, visible signal -- a differently-named tag/image/version/sha/digest/ref variable whose value doesn't match, or a .tfvars/-var-file reference -- confirmed against two more real production repos where the image reference is either assembled inside Terraform HCL from a bare `${{ github.sha }}` (cal-itp) or written into a generated tfvars file from a GitHub Secret this play correctly cannot and should not see through (skkuding/codedang). Validated against 25+ real public repos via GitHub code search, not just synthetic fixtures; that search surfaced and fixed a job-parser bug where a comment line right after `jobs:` silently produced zero detected jobs across the entire file, with no error (confirmed live on skkuding/codedang). Detects the pattern whether build and deploy share one job or are linked by needs:, whether the build step has one tag or several, and whether multiple build+deploy pairs exist in one file (a monorepo -- every pair gets fixed, not just the first). Every fix is minimal: it adds an id: to the build step, an output exposing the digest, and rewires only the one line that named the mutable tag -- nothing else in the file is touched, so the diff a reviewer sees is exactly the change and nothing more. Out of scope, stated plainly rather than silently guessed at: resolving arbitrary shell `$VAR`/`${VAR}` or `${{ env.X }}` references to their literal values, and reading actual Terraform .tf/HCL files to see how a bare tag variable gets assembled into a full image reference -- both report UNKNOWN when a relevant signal is present, never a false CLEAR. No third-party dependencies: pure python3 standard library, so there is nothing to pip install on a machine that may not allow it. Read-only unless open_pr=true, which writes the fix to disk on a new branch and opens a PR through your already-authenticated gh CLI -- no new credential. Pass demo=true to run against bundled fixture workflows with zero setup. Not a daily-habit tool by itself -- an already-fixed repo reports CLEAR every time. Run it once per repo to fix what's there, or copy the GitHub Actions template in this repo's templates/ so it gates every PR touching a workflow file (no Rote needed at CI time); verified end to end with a real git diff across a two-branch repo."
+ * description: "Finds a GitHub Actions pipeline that builds a Docker image and then deploys it with Terraform using a mutable tag instead of the immutable digest the build step already produced, and fixes it. A push landing between build and deploy -- or a scheduled re-run -- can otherwise deploy a different image than the one that was actually built and tested; a Docker maintainer has confirmed there are no plans to make buildx share images across GitHub Actions jobs another way, which is why pipelines lean on this pattern in the first place. Covers two build shapes: docker/build-push-action, and a raw `docker build`/`docker buildx build` shell command -- for the raw shape, a plain build prints several different sha256 digests and grabbing the first one seen would silently pick the wrong one, so the fix adds --metadata-file and reads its containerimage.digest field instead, cross-checked against `docker inspect --format {{.RepoDigests}}` on a real build. Also catches the case where --metadata-file is already present but its digest is never actually read anywhere. Matches ANY -var or TF_VAR_ name, not just 'image' -- confirmed necessary against a real repo (cal-itp/benefits names its variable TF_VAR_CONTAINER_TAG) -- and follows a real terraform command across backslash line-continuations (confirmed against everclearorg/mark). When a build+deploy pair exists but no variable's value matches the built image, reports UNKNOWN rather than a false CLEAR: only on a real, visible signal -- a differently-named tag/image/version/sha/digest/ref variable, or a .tfvars/-var-file reference -- confirmed against two real repos where the image reference is assembled inside Terraform HCL (cal-itp) or a generated tfvars file this play correctly cannot see through (skkuding/codedang). For the first kind of UNKNOWN, this play now also reads the repo's own real .tf files (the same `repo_path` it already has) for that exact variable reaching a container/deploy resource without a digest, marking a match [CONFIRMED] with the HCL line as evidence -- verified live against cal-itp/benefits itself. Still never edits Terraform, confirmed or not -- that fix is a human's call. Validated against 25+ real public repos via GitHub code search, not just synthetic fixtures; that search surfaced and fixed a job-parser bug where a comment line right after `jobs:` silently produced zero detected jobs across the entire file, with no error (confirmed live on skkuding/codedang). Detects the pattern whether build and deploy share one job or are linked by needs:, whether the build step has one tag or several, and whether multiple build+deploy pairs exist in one file (a monorepo -- every pair gets fixed, not just the first). Every fix is minimal: it adds an id: to the build step, an output exposing the digest, and rewires only the one line that named the mutable tag -- nothing else in the file is touched, so the diff a reviewer sees is exactly the change and nothing more. Out of scope, stated plainly rather than silently guessed at: resolving arbitrary shell `$VAR`/`${VAR}` or `${{ env.X }}` references to their literal values, and writing to Terraform/.tf files at all -- both report UNKNOWN (or [CONFIRMED], never auto-fixed) rather than a false CLEAR. No third-party dependencies: pure python3 standard library, so there is nothing to pip install on a machine that may not allow it. Read-only unless open_pr=true, which writes the fix to disk on a new branch and opens a PR through your already-authenticated gh CLI -- no new credential. Pass demo=true to run against bundled fixture workflows with zero setup. Not a daily-habit tool by itself -- an already-fixed repo reports CLEAR every time. Run it once per repo to fix what's there, or copy the GitHub Actions template in this repo's resources/templates/ so it gates every PR touching a workflow file (no Rote needed at CI time); verified end to end with a real git diff across a two-branch repo."
  * source: https://github.com/Satianurag/ci-digest-guard
  * provenance:
  *   author: Satianurag <anuragsati6476@gmail.com>
  *   workspace: satianurag/ci-digest-guard
  * metadata:
- *   version: 0.4.0
- *   rote_version: 0.78.0
+ *   version: 0.5.0
+ *   rote_version: 0.80.0
  *   status: draft
  *   kind: atomic
  *   flow_type: parallel
@@ -70,7 +70,7 @@
  *   param_type: boolean
  *   required: false
  *   default: "false"
- *   description: "Run against three bundled fixture workflows instead of your real repository, for a zero-setup first look. Never writes anything and never opens a PR, even if open_pr=true."
+ *   description: "Run against five bundled fixture workflows instead of your real repository, for a zero-setup first look. Never writes anything and never opens a PR, even if open_pr=true."
  *   example: "true"
  * tags:
  * - docker
@@ -180,6 +180,8 @@ interface Unknown {
   deploy_job: string;
   line: number;
   reason: string;
+  confirmed?: boolean;
+  confirmed_evidence?: string | null;
 }
 
 interface ScanResultEntry {
@@ -344,7 +346,11 @@ async function renderSuccess(): Promise<void> {
       if (r.status === "UNKNOWN" || r.status === "MIXED") {
         lines.push(`  UNKNOWN  ${short}`);
         for (const u of r.unknowns) {
-          lines.push(`           · job '${u.deploy_job}' (build '${u.build_job}'), line ${u.line}: ${u.reason}`);
+          const tag = u.confirmed ? "[CONFIRMED] " : "";
+          lines.push(`           · ${tag}job '${u.deploy_job}' (build '${u.build_job}'), line ${u.line}: ${u.reason}`);
+          if (u.confirmed && u.confirmed_evidence) {
+            lines.push(`             -> ${u.confirmed_evidence}`);
+          }
         }
       }
     }
@@ -368,12 +374,40 @@ async function renderSuccess(): Promise<void> {
     lines.push("  but its value could not be verified from this workflow file alone (a");
     lines.push("  differently-named variable, a value assembled elsewhere, or a .tfvars/");
     lines.push("  secret-sourced value). Not fixed automatically -- worth a human look.");
+    const confirmedCount = scanOut.results.reduce(
+      (n, r) => n + r.unknowns.filter((u) => u.confirmed).length,
+      0,
+    );
+    if (confirmedCount > 0) {
+      lines.push("");
+      lines.push(`  [CONFIRMED] means: this repo's own Terraform code was read directly and`);
+      lines.push("  proves the mutable tag really does reach a deployed container resource --");
+      lines.push("  not fixed automatically because this play only edits GitHub Actions YAML,");
+      lines.push("  never Terraform/.tf files, but the fix belongs on the Terraform side (e.g.");
+      lines.push("  accept a full image@digest reference instead of a bare tag).");
+    }
   }
 
   out.human(lines.join("\n"));
 
+  // A discover-step warning (bad/missing repo_path, no workflows
+  // directory) means the scan step never actually examined anything --
+  // total_files/total_issues/total_unknowns are all zero not because the
+  // repo is clean, but because there was nothing to scan in the first
+  // place. Confirmed a real false claim of safety: with scanOut.total_
+  // issues===0 and total_unknowns===0 both trivially true in that case,
+  // this used to render the exact same "0 file(s) — CLEAR" summary (and
+  // omit the warning from the JSON result entirely) as a genuinely clean
+  // repo, indistinguishable to anyone reading only the summary or json
+  // output mode -- only the human view happened to also print the
+  // warning as a line. Both modes now say plainly that nothing was
+  // scanned, and the warning travels into the canonical result too.
+  const noScanOccurred = Boolean(discoverOut.warning) && scanOut.total_files === 0;
+
   out.summary(
-    scanOut.total_issues === 0 && scanOut.total_unknowns === 0
+    noScanOccurred
+      ? `not scanned — ${discoverOut.warning}`
+      : scanOut.total_issues === 0 && scanOut.total_unknowns === 0
       ? `${scanOut.total_files} file(s) — CLEAR${badge}`
       : `${scanOut.total_files} file(s), ${scanOut.total_issues} issue(s) found${unknownNote}${
           openPrOut && !openPrOut.skipped ? " · PR opened" : ""
@@ -384,6 +418,8 @@ async function renderSuccess(): Promise<void> {
     schema: "ci-digest-guard/1",
     demo: scanOut.demo,
     path: discoverOut.path,
+    warning: discoverOut.warning ?? null,
+    scanned: !noScanOccurred,
     total_files: scanOut.total_files,
     total_issues: scanOut.total_issues,
     total_unknowns: scanOut.total_unknowns,
@@ -395,7 +431,7 @@ async function renderSuccess(): Promise<void> {
       reason: r.reason ?? null,
     })),
     pr: openPrOut,
-    play_version: "0.3.0",
+    play_version: "0.5.0",
     run_id: ctx.run.run_id,
     representations: {
       human: "complete — per-file status, findings, and PR outcome if requested",

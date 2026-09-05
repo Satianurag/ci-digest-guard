@@ -36,7 +36,7 @@ resembles "daily":
 2. **Wire it into your own CI as a gate**, so it runs on *every pull request
    that touches a workflow file* — which for an active repo is far more
    frequent than daily, and it's exactly the moment this class of bug gets
-   introduced. See [`templates/`](./templates) for a ready-to-copy GitHub
+   introduced. See [`resources/templates/`](./resources/templates) for a ready-to-copy GitHub
    Actions workflow that does this. No Rote installation needed at CI time:
    the whole engine is plain `python3` standard library on purpose, so the
    gate is two files copied into `.github/scripts/` and one workflow file.

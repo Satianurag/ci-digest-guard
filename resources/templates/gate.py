@@ -11,11 +11,15 @@ Usage in a workflow (see pr-gate.yml in this same directory):
     python3 .github/scripts/gate.py $(git diff --name-only \
         origin/${{ github.base_ref }}... -- '.github/workflows/*.yml' '.github/workflows/*.yaml')
 
-Exit code 1 (fails the check) only on a FOUND (fixable, confirmed
-mutable-tag) result. An UNKNOWN result prints a warning annotation but
-does not fail the build -- it means a real signal exists that this
-script cannot fully verify (see engine.py's find_unknowns docstring),
-which is a prompt for human review, not a confirmed problem.
+Exit code 1 (fails the check) on a FOUND (fixable, confirmed mutable-tag)
+result, and also on an UNKNOWN that gets [CONFIRMED] against this repo's
+own real .tf files (see engine.py's confirm_unknown_via_hcl) -- that one
+is no longer a maybe, it's a proven mutable-tag deploy, just one whose
+fix belongs in Terraform rather than this YAML file. A plain,
+unconfirmed UNKNOWN prints a warning annotation but does not fail the
+build -- it means a real signal exists that this script cannot fully
+verify (see engine.py's find_unknowns docstring), which is a prompt for
+human review, not a proven problem.
 """
 import os
 import sys
@@ -29,6 +33,13 @@ def main():
     if not paths:
         print("ci-digest-guard gate: no changed workflow files to check")
         return 0
+
+    # This script runs inside the target repo's own checkout at CI time
+    # (see the usage example above) -- os.getcwd() IS the repo root, the
+    # same real filesystem access engine.py's HCL cross-reference needs.
+    # Computed once for the whole run, not per-file.
+    repo_path = os.getcwd()
+    tf_files = engine.find_hcl_files(repo_path)
 
     had_found = False
     had_unknown = False
@@ -59,11 +70,18 @@ def main():
                       f"Run the ci-digest-guard Play with open_pr=true to generate the fix, "
                       f"or apply it by hand: pin to @<digest> instead of :<tag>.")
         if unknowns:
-            had_unknown = True
             for u in unknowns:
-                print(f"::warning file={path}::ci-digest-guard: {u['reason']} "
-                      f"(job '{u['deploy_job']}', line {u['line']}) -- worth a human look, "
-                      f"not auto-fixable.")
+                evidence = engine.confirm_unknown_via_hcl(u, repo_path, tf_files)
+                if evidence:
+                    had_found = True
+                    print(f"::error file={path}::ci-digest-guard: {u['reason']} -- CONFIRMED against "
+                          f"this repo's own Terraform code ({evidence}). Not auto-fixable here: the "
+                          f"fix belongs in Terraform (accept a full image@digest reference).")
+                else:
+                    had_unknown = True
+                    print(f"::warning file={path}::ci-digest-guard: {u['reason']} "
+                          f"(job '{u['deploy_job']}', line {u['line']}) -- worth a human look, "
+                          f"not auto-fixable.")
         if not findings and not unknowns:
             print(f"ci-digest-guard gate: {path} CLEAR")
 

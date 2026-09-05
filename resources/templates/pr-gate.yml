@@ -1,7 +1,7 @@
 name: ci-digest-guard gate
 
 # Copy this file to .github/workflows/ci-digest-guard-gate.yml, and copy
-# gate.py + engine.py from the same templates/ directory to
+# gate.py + engine.py from the same resources/templates/ directory to
 # .github/scripts/. No Rote installation needed at CI time -- both
 # scripts are plain python3 standard library, on purpose.
 #
