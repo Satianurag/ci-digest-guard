@@ -89,11 +89,37 @@ HCL from a bare `${{ github.sha }}` this play correctly can't see the other
 half of; the other writes a full `terraform.tfvars` from a GitHub Secret,
 which is — correctly — opaque.
 
+### UNKNOWN, then CONFIRMED: reading your actual Terraform
+
+For the most common kind of UNKNOWN — a tag-ish variable whose value can't be
+matched to the built image from the workflow file alone — the play now goes and
+reads your repo's own `.tf` files, using the `repo_path` it already has. If that
+exact variable turns up inside a container/deploy resource, interpolated into an
+image reference with no digest, the finding is upgraded to **`[CONFIRMED]`** and
+carries the real HCL line as evidence:
+
+```
+UNKNOWN  deploy.yml
+   · [CONFIRMED] job 'deploy' (build 'build'), line 14: env var TF_VAR_CONTAINER_TAG …
+     -> infra/main.tf: image = "ghcr.io/acme/api:${var.container_tag}"
+```
+
+Verified live against the real `cal-itp/benefits` repo — the same repo that
+justified having an UNKNOWN category in the first place. It resolves
+`TF_VAR_CONTAINER_TAG` → `var.container_tag` → `azurerm_container_app.web`'s
+image, in `terraform/modules/application/app_web.tf`.
+
+Deliberately one-directional: this can turn an UNKNOWN into a CONFIRMED
+finding, and never turns an UNKNOWN into a CLEAR. Not finding a match proves
+nothing — the reference could be inside a module, or a resource type the check
+doesn't recognise — and a false CLEAR is the one claim this play refuses to
+make. It also never *edits* Terraform, confirmed or not; that fix belongs in
+HCL and is a human's call.
+
 **Explicitly out of scope**, documented rather than silently guessed at:
 resolving arbitrary shell `$VAR`/`${VAR}` or `${{ env.X }}` references to
-their literal values, and reading actual `.tf`/HCL files to see how a bare tag
-variable gets assembled into a full image reference. Both report `UNKNOWN`
-when a relevant signal is present.
+their literal values, and writing to `.tf` files at all. Both report `UNKNOWN`
+(or `CONFIRMED`, never auto-fixed) when a relevant signal is present.
 
 ## Tested against real production repositories, not just fixtures
 
