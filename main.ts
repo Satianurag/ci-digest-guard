@@ -19,7 +19,7 @@
  *   author: Satianurag <anuragsati6476@gmail.com>
  *   workspace: satianurag/ci-digest-guard
  * metadata:
- *   version: 0.5.0
+ *   version: 0.5.1
  *   rote_version: 0.80.0
  *   status: draft
  *   kind: atomic
@@ -28,6 +28,8 @@
  *   format: typescript
  *   requires_endpoints: []
  *   requires_sessions: false
+ *   write_permissions:
+ *   - tool: open_pr
  *   contract:
  *     atomic: true
  *     input:
@@ -88,17 +90,15 @@
  *   - ci-cd
  *   - deterministic
  *   - zero-dependencies
- * # Every path this play writes, with mode and reason -- disclosed here
- * # because a process.exec play cannot populate the registry's own
- * # effects.declaredWrites; `rote play inspect` will still print "Write
- * # permissions: none declared" for a play shaped this way.
- * write_permissions:
- * - resource: "<repo>/.github/workflows/*.yml matched by `path`"
- *   mode: replace
- *   why: "Only when open_pr=true and a fix was found: the exact workflow file is rewritten with the minimal fix (id:, outputs:, and the one corrected line) before being committed. Never touched when open_pr=false (the default) or when demo=true."
- * - resource: "local git branch ci-digest-guard/pin-image-digest, and its PR on the configured remote"
- *   mode: create
- *   why: "Only when open_pr=true and a fix was found. Uses the git and gh already configured on this machine -- no new credential is requested or stored."
+ * # Everything this play writes, in the two places the platform actually
+ * # reads: metadata.write_permissions (above) is passed through verbatim to
+ * # the registry card's effects.declaredWrites, which is what the consent
+ * # panel prints before a run; this top-level list is what the audit reach
+ * # table renders. Both are empty for the overwhelming majority of the
+ * # registry, so an empty panel there means "undeclared", not "read-only".
+ * writes:
+ * - "<repo>/.github/workflows/*.yml (replace) -- only when open_pr=true and a fix was found: the matched workflow file is rewritten with the minimal fix (id:, outputs:, and the one corrected line) before being committed. Never touched when open_pr=false (the default) or when demo=true."
+ * - "local git branch ci-digest-guard/pin-image-digest, and its PR on the configured remote (create) -- only when open_pr=true and a fix was found. Uses the git and gh already configured on this machine; no new credential is requested or stored."
  * steps:
  *   discover:
  *     type: process.exec
@@ -431,7 +431,7 @@ async function renderSuccess(): Promise<void> {
       reason: r.reason ?? null,
     })),
     pr: openPrOut,
-    play_version: "0.5.0",
+    play_version: "0.5.1",
     run_id: ctx.run.run_id,
     representations: {
       human: "complete — per-file status, findings, and PR outcome if requested",
